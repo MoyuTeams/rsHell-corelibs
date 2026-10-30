@@ -1,4 +1,4 @@
-use std::{io::Write, thread::JoinHandle, time::Duration};
+use std::{thread::JoinHandle, time::Duration};
 
 use portable_pty::{Child, MasterPty, PtySize};
 use rshell_core::{ExitStatus, SessionFailure, TerminalSize};
@@ -9,8 +9,10 @@ use crate::{TransportError, TransportEvent};
 use super::local_reader::ReaderEvent;
 
 mod lifecycle;
+mod writer;
 
 pub(super) use lifecycle::join_reader_thread;
+pub(super) use writer::{PtyWriter, spawn_writer};
 
 const CHILD_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const SHUTDOWN_GRACE: Duration = Duration::from_millis(250);
@@ -28,7 +30,8 @@ pub(super) struct LocalRuntime {
     process_group: Option<i32>,
     #[cfg(windows)]
     process_job: Option<rshell_platform::WindowsProcessJob>,
-    writer: Option<Box<dyn Write + Send>>,
+    writer: Option<PtyWriter>,
+    writer_thread: Option<JoinHandle<()>>,
     child: Option<Box<dyn Child + Send + Sync>>,
     reader_rx: mpsc::Receiver<ReaderEvent>,
     reader_thread: Option<JoinHandle<()>>,
@@ -41,7 +44,8 @@ pub(super) struct LocalRuntime {
 impl LocalRuntime {
     pub(super) fn new(
         master: Box<dyn MasterPty>,
-        writer: Box<dyn Write + Send>,
+        writer: PtyWriter,
+        writer_thread: JoinHandle<()>,
         child: Box<dyn Child + Send + Sync>,
         reader_rx: mpsc::Receiver<ReaderEvent>,
         reader_thread: JoinHandle<()>,
@@ -56,6 +60,7 @@ impl LocalRuntime {
             #[cfg(windows)]
             process_job: Some(process_job),
             writer: Some(writer),
+            writer_thread: Some(writer_thread),
             child: Some(child),
             reader_rx,
             reader_thread: Some(reader_thread),
@@ -120,10 +125,13 @@ impl LocalRuntime {
         }
     }
 
-    pub(super) fn write(&mut self, bytes: &[u8]) -> Result<(), TransportError> {
-        let writer = self.writer.as_mut().ok_or_else(pty_error)?;
-        writer.write_all(bytes).map_err(|_| pty_error())?;
-        writer.flush().map_err(|_| pty_error())
+    /// 把输入交给专用写线程；返回表示已入队，写线程的失败由之后的 `write` 报告。
+    pub(super) async fn write(&mut self, bytes: &[u8]) -> Result<(), TransportError> {
+        self.writer
+            .as_ref()
+            .ok_or_else(pty_error)?
+            .write(bytes)
+            .await
     }
 
     pub(super) fn resize(&mut self, size: TerminalSize) -> Result<(), TransportError> {
@@ -193,3 +201,6 @@ fn exit_status(status: portable_pty::ExitStatus) -> ExitStatus {
 fn pty_error() -> TransportError {
     TransportError::new(SessionFailure::Pty)
 }
+
+#[cfg(test)]
+pub(super) use writer::WRITER_QUEUE_LIMIT;

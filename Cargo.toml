@@ -1,0 +1,12 @@
+[workspace]
+members = [
+    "crates/rshell-core",
+    "crates/rshell-platform",
+    "crates/rshell-session",
+    "crates/rshell-storage",
+]
+exclude = ["third_party/portable-pty-psmux"]
+resolver = "3"
+
+[patch.crates-io]
+crypto-bigint = { git = "https://github.com/MoyuTeams/crypto-bigint", rev = "9a4f70ace040b57f5f5cffc0d4389d2676baee9d", version = "=0.7.5" }
